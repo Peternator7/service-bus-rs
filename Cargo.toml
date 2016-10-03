@@ -1,0 +1,16 @@
+[package]
+name = "azure"
+version = "0.1.0"
+authors = ["Peter Glotfelty <glotfelty.2@osu.edu>"]
+
+[dependencies]
+time = "*"
+rust-crypto = "*"
+rustc-serialize = "*"
+url = "*"
+lazy_static = "*"
+hyper = "*"
+serde = "*"
+serde_json = "*"
+serde_macros = "*"
+quick-xml = "*"
