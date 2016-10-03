@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn queue_send_message() {
-        let queue = QueueClient::with_conn_and_queue(&*CONNECTION_STRING, "test1").unwrap();
+        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
         let message = BrokeredMessage::with_body("Cats and Dogs");
         match queue.send(message) {
             Err(e) => {
