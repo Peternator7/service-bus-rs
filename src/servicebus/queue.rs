@@ -22,9 +22,12 @@ lazy_static!{
     static ref CLIENT: Client = Client::new();
 }
 
+/// The Queue Trait is an abstraction over different types of Queues that
+/// can be used when communicating with an Azure Service Bus Queue.
 pub trait Queue
     where Self: Sized
 {
+    ///
     fn queue(&self) -> &str;
     fn refresh_sas(&self) -> String;
     fn endpoint(&self) -> &url::Url;
