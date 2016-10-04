@@ -23,30 +23,62 @@ lazy_static!{
 }
 
 /// The Queue Trait is an abstraction over different types of Queues that
-/// can be used when communicating with an Azure Service Bus Queue.
+/// can be used when communicating with an Azure Service Bus Queue. The concurrent version
+/// is both send and sync. All methods take a reference to the client so the ConcurrentQueueClient
+/// can be used across multiple threads by simply wrapping it in an Arc<T>. The only step that is
+/// synchronized is regenerating the auth key so prefer this struct to using an Arc<Mutex<Queue>>
+///
+/// The non-concurrent version isn't Sync because it internally uses a RefCell to hide the fact
+/// that it will generate new credentials occasionally. Prefer this version if you don't need
+/// synchronization as it avoids the overhead of obtaining a mutex lock.
 pub trait Queue
     where Self: Sized
 {
-    ///
+    /// The queue name.
     fn queue(&self) -> &str;
+
+    /// Regenerates the SAS string if it is close to expiring. Returns a valid SAS string
+    /// This function may return the same String multiple times.
     fn refresh_sas(&self) -> String;
+
+    /// The endpoint for the Queue. `http://{namespace}.servicebus.net/`
     fn endpoint(&self) -> &url::Url;
 
+    /// Send a message to the queue. Consumes the message. If the serve returned an error
+    /// Then this function will return an error. The default timeout is 30 seconds.
+    ///
+    /// ```
+    /// use servicebus::brokeredmessage::BrokeredMessage;
+    ///
+    /// let message = BrokeredMessage::with_body("This is a message");
+    /// match my_queue.send(message) {
+    ///     Ok(_) => println!("The message sent successfully"),
+    ///     Err(e) => println!("The error was: {:?}", e);
+    /// }
+    /// ```
     fn send(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
         let timeout = Duration::from_secs(30);
         self.send_with_timeout(message, timeout)
     }
 
+    /// Receive a message from the queue. Returns either the deserialized message or an error
+    /// detailing what went wrong. The message will not be deleted on the server until
+    /// `queue_client.complete_message(message)` is called. This is ideal for applications that
+    /// can't afford to miss a message.
     fn receive(&self) -> Result<BrokeredMessage, AzureRequestError> {
         let timeout = Duration::from_secs(30);
         self.receive_with_timeout(timeout)
     }
 
+    /// Receive a message from the queue. Returns the deserialized message or an error.
+    /// The message is deleted from the queue when it is received. If the application crashes,
+    /// the contents of the message can be lost.
     fn receive_and_delete(&self) -> Result<BrokeredMessage, AzureRequestError> {
         let timeout = Duration::from_secs(30);
         self.receive_and_delete_with_timeout(timeout)
     }
 
+    /// Sends a message to the Service Bus Queue with a designated timeout.
     fn send_with_timeout(&self,
                          message: BrokeredMessage,
                          timeout: Duration)
@@ -76,6 +108,9 @@ pub trait Queue
         }
     }
 
+    /// Receive a message from the queue. Returns the deserialized message or an error.
+    /// The message is deleted from the queue when it is received. If the application crashes,
+    /// the contents of the message can be lost.
     fn receive_and_delete_with_timeout(&self,
                                        timeout: Duration)
                                        -> Result<BrokeredMessage, AzureRequestError> {
@@ -103,6 +138,10 @@ pub trait Queue
         }
     }
 
+    /// Receive a message from the queue. Returns either the deserialized message or an error
+    /// detailing what went wrong. The message will not be deleted on the server until
+    /// `queue_client.complete_message(message)` is called. This is ideal for applications that
+    /// can't afford to miss a message. Allows a timeout to be specified for greater control.
     fn receive_with_timeout(&self,
                             timeout: Duration)
                             -> Result<BrokeredMessage, AzureRequestError> {
@@ -129,6 +168,14 @@ pub trait Queue
         }
     }
 
+    /// Completes a message that has been received from the Service Bus. This will fail
+    /// if the message was created locally. Once a message is created, it cannot be restored
+    ///
+    /// ```
+    /// let message = my_queue.receive().unwrap();
+    /// // Do lots of processing with the message. Send it to another database.
+    /// my_queue.complete_message(message);
+    /// ```
     fn complete_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
 
@@ -150,6 +197,9 @@ pub trait Queue
         }
     }
 
+    /// Releases the lock on a message and puts it back into the queue.
+    /// This method generally indicates that the message could not be
+    /// handled properly and should be attempted at a later time.
     fn abandon_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
 
@@ -171,7 +221,22 @@ pub trait Queue
         }
     }
 
-    fn renew_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
+    /// Renews the lock on a message. If a message is received by calling
+    /// `queue.receive()` or `queue.receive_with_timeout()` then the message is locked
+    /// but not deleted on the Service Bus. This method allows the lock to be renewed
+    /// if additional time is needed to finish processing the message.
+    ///
+    /// ```
+    /// use std::thread::sleep;
+    ///
+    /// let message = queue.receive();
+    /// sleep(2*60*1000);
+    /// //Renew the lock on the message so that we can keep processing it.
+    /// queue.renew_message(message);
+    /// sleep(2*60*1000);
+    /// queue.complete_message(message);
+    /// ```
+    fn renew_message(&self, message: &BrokeredMessage) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
 
         // Take either the Sequence number or the Message ID
@@ -192,6 +257,14 @@ pub trait Queue
         }
     }
 
+    /// Creates an event loop for handling messages that blocks the current thread.
+    ///
+    /// ```
+    /// queue.on_message(|message| {
+    ///     // Do message processing
+    ///     queue.complete_message(message);
+    /// });
+    /// ```
     fn on_message<H>(&self, handler: H) -> AzureRequestError
         where H: Fn(BrokeredMessage)
     {
@@ -206,8 +279,9 @@ pub trait Queue
     }
 }
 
-// This version is Send but not Sync
-// It's probably slightly more performant than the concurrent version.
+/// Client for sending and receiving messages from a Service Bus Queue in Azure.
+/// This cient is `!Sync` because it internally uses a RefCell to keep track of
+/// its authorization token, but it is still ideal for single threaded use.
 pub struct QueueClient {
     connection_string: String,
     queue_name: String,
@@ -216,6 +290,9 @@ pub struct QueueClient {
 }
 
 impl QueueClient {
+    /// Create a new queue with a connection string and the name of a queue.
+    /// The connection string can be copied and pasted from the azure portal.
+    /// The queue name should be the name of an existing queue.
     pub fn with_conn_and_queue(connection_string: &str,
                                queue: &str)
                                -> Result<QueueClient, url::ParseError> {
@@ -275,8 +352,20 @@ impl Queue for QueueClient {
     }
 }
 
-// The ConcurrentQueueClient is Send and Sync
-// Wrap it in an Arc and it can be shared between threads freely.
+/// The ConcurrentQueueClient has all the same methods as QueueClient, but it is also
+/// `Sync`. This means that it can be shared between threads. Prefer using a Arc<ConcurrentQueueClient>
+/// over an Arc<Mutex<QueueClient>> to share the thread between queues.
+///
+/// ```
+/// use std::thread;
+/// let queue = Arc::new(ConcurrentQueueClient::with_conn_and_queue(conn,queue_name));
+/// for _ in 0..10 {
+///     let q = queue.clone();
+///     thread::spawn(move || {
+///         q.send(BrokeredMessage::with_body("Sending a concurrent message"));
+///     });
+/// }
+/// ```
 pub struct ConcurrentQueueClient {
     connection_string: String,
     queue_name: String,
@@ -365,6 +454,8 @@ fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
     }
 }
 
+// Complete, Abandon, Renew all make calls to the same Uri so here's a quick function
+// for generating it.
 fn get_message_update_path<T>(q: &T, message: &BrokeredMessage) -> Option<url::Url>
     where T: Queue
 {
@@ -380,7 +471,6 @@ fn get_message_update_path<T>(q: &T, message: &BrokeredMessage) -> Option<url::U
         .and_then(|path| q.endpoint().join(&*path).ok());
     target
 }
-
 
 #[cfg(test)]
 mod tests {
