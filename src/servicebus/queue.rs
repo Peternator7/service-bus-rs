@@ -22,7 +22,9 @@ lazy_static!{
     static ref CLIENT: Client = Client::new();
 }
 
-pub trait Queue {
+pub trait Queue
+    where Self: Sized
+{
     fn queue(&self) -> &str;
     fn refresh_sas(&self) -> String;
     fn endpoint(&self) -> &url::Url;
@@ -80,7 +82,7 @@ pub trait Queue {
                            self.queue(),
                            timeout.as_secs());
 
-        match self.endpoint().join(&*path) {
+        match self.endpoint().join(&path) {
             Ok(uri) => {
                 let mut header = Headers::new();
                 header.set(Authorization(sas));
@@ -97,6 +99,7 @@ pub trait Queue {
             Err(_) => Err(AzureRequestError::InvalidEndpoint),
         }
     }
+
     fn receive_with_timeout(&self,
                             timeout: Duration)
                             -> Result<BrokeredMessage, AzureRequestError> {
@@ -105,7 +108,7 @@ pub trait Queue {
                            self.queue(),
                            timeout.as_secs());
 
-        match self.endpoint().join(&*path) {
+        match self.endpoint().join(&path) {
             Ok(uri) => {
                 let mut header = Headers::new();
                 header.set(Authorization(sas));
@@ -128,18 +131,54 @@ pub trait Queue {
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = message.props
-            .SequenceNumber
-            .map(|seq| seq.to_string())
-            .or(message.props.MessageId.clone())
-            .and_then(|id| message.props.LockToken.as_ref().map(|lock| (id, lock)))
-            .map(|(id, lock)| format!("/{}/messages/{}/{}", self.queue(), id, lock))
-            .and_then(|path| self.endpoint().join(&*path).ok());
+        let target = get_message_update_path(self, &message);
 
         if let Some(target) = target {
             let mut header = Headers::new();
             header.set(Authorization(sas));
             let result = CLIENT.delete(target).headers(header).send();
+            if let Ok(response) = result {
+                interpret_results(response.status)
+            } else {
+                Err(AzureRequestError::HyperError)
+            }
+        } else {
+            Err(AzureRequestError::LocalMessage)
+        }
+    }
+
+    fn abandon_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
+        let sas = self.refresh_sas();
+
+        // Take either the Sequence number or the Message ID
+        // Then add the lock token and finally join it into the targer
+        let target = get_message_update_path(self, &message);
+
+        if let Some(target) = target {
+            let mut header = Headers::new();
+            header.set(Authorization(sas));
+            let result = CLIENT.put(target).headers(header).send();
+            if let Ok(response) = result {
+                interpret_results(response.status)
+            } else {
+                Err(AzureRequestError::HyperError)
+            }
+        } else {
+            Err(AzureRequestError::LocalMessage)
+        }
+    }
+
+    fn renew_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
+        let sas = self.refresh_sas();
+
+        // Take either the Sequence number or the Message ID
+        // Then add the lock token and finally join it into the targer
+        let target = get_message_update_path(self, &message);
+
+        if let Some(target) = target {
+            let mut header = Headers::new();
+            header.set(Authorization(sas));
+            let result = CLIENT.post(target).headers(header).send();
             if let Ok(response) = result {
                 interpret_results(response.status)
             } else {
@@ -323,6 +362,22 @@ fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
     }
 }
 
+fn get_message_update_path<T>(q: &T, message: &BrokeredMessage) -> Option<url::Url>
+    where T: Queue
+{
+
+    // Take either the Sequence number or the Message ID
+    // Then add the lock token and finally join it into the targer
+    let target = message.props
+        .SequenceNumber
+        .map(|seq| seq.to_string())
+        .or(message.props.MessageId.clone())
+        .and_then(|id| message.props.LockToken.as_ref().map(|lock| (id, lock)))
+        .map(|(id, lock)| format!("/{}/messages/{}/{}", q.queue(), id, lock))
+        .and_then(|path| q.endpoint().join(&*path).ok());
+    target
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -356,7 +411,7 @@ mod tests {
 
     #[test]
     fn queue_receive_message() {
-        let queue = QueueClient::with_conn_and_queue(&*CONNECTION_STRING, "test1").unwrap();
+        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
         match queue.receive_and_delete() {
             Err(e) => {
                 println!("{:?}", e);
@@ -368,7 +423,7 @@ mod tests {
 
     #[test]
     fn queue_complete_message() {
-        let queue = QueueClient::with_conn_and_queue(&*CONNECTION_STRING, "test1").unwrap();
+        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
         queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
         match queue.receive() {
             Err(e) => {
@@ -389,8 +444,52 @@ mod tests {
     }
 
     #[test]
+    fn queue_abandon_message() {
+        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
+        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
+        match queue.receive() {
+            Err(e) => {
+                println!("{:?}", e);
+                panic!("Failed to receive message.")
+            }
+            Ok(message) => {
+                match queue.abandon_message(message.clone()) {
+                    Err(e) => {
+                        println!("{:?}", e);
+                        println!("{:?}", message);
+                        panic!("Failed to abandon the message");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn queue_renew_message() {
+        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
+        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
+        match queue.receive() {
+            Err(e) => {
+                println!("{:?}", e);
+                panic!("Failed to receive message.")
+            }
+            Ok(message) => {
+                match queue.renew_message(message.clone()) {
+                    Err(e) => {
+                        println!("{:?}", e);
+                        println!("{:?}", message);
+                        panic!("Failed to renew the message");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
     fn conncurrent_queue_send_message() {
-        let queue = ConcurrentQueueClient::with_conn_and_queue(&*CONNECTION_STRING, "test1")
+        let queue = ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1")
             .unwrap();
         let message = BrokeredMessage::with_body("Cats and Dogs");
         match queue.send(message) {
@@ -404,7 +503,7 @@ mod tests {
 
     #[test]
     fn concurrent_queue_receive_message() {
-        let queue = ConcurrentQueueClient::with_conn_and_queue(&*CONNECTION_STRING, "test1")
+        let queue = ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1")
             .unwrap();
         match queue.receive_and_delete() {
             Err(e) => {

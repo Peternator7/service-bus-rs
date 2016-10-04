@@ -84,7 +84,7 @@ impl BrokeredMessage {
     }
 
     pub fn get_body_raw(&self) -> &str {
-        &*self.body
+        &self.body
     }
 
     pub fn props_as_json(&self) -> String {
@@ -109,5 +109,12 @@ mod tests {
         assert_eq!(Ok(String::from("<b>Hello World</b>")), message.get_body());
         assert_eq!("<string><b>Hello World</b></string>",
                    message.get_body_raw());
+    }
+
+    #[test]
+    fn message_json_test() {
+        let message = BrokeredMessage::with_body("{\"Azure\":2}");
+        assert_eq!(Ok(String::from("{\"Azure\":2}")), message.get_body());
+        assert_eq!("<string>{\"Azure\":2}</string>", message.get_body_raw());
     }
 }
