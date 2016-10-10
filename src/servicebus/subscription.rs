@@ -11,7 +11,6 @@ use time2;
 use hyper::client::Client;
 use hyper::header::*;
 use hyper::status::StatusCode;
-use hyper::mime::Mime;
 
 const CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
 const SAS_BUFFER_TIME: usize = 15;
@@ -32,16 +31,22 @@ lazy_static!{
 /// that it will generate new credentials occasionally. Prefer this version if you don't need
 /// synchronization as it avoids the overhead of obtaining a mutex lock.
 ///
-/// Queues are useful in a number of situations. Queues are simpler than topics. All producers and
-/// consumers read/write from the same queue. This can be used to create load balancing in a server with
-/// multiple message consumers all reading messages as they come in. It can also be used in situations
-/// when there is asyncronous processing that needs to be done. Producers can add messages to the queue
-/// and not need to be concerned with whether there is a process running to consume the message immediately.
-pub trait Queue
+/// Topics and subscriptions work together hand in hand. Together they provide similar functionality
+/// to queues. Producers send message to the topic. Consumers then create a subscription to the
+/// topic to receive every messages. Each subscription functions as an individual queue. This is useful
+/// when the same message will be read multiple times for different reasons. An example might be
+/// adding logging to the Service bus. One subscription might be used to provide load balancing for
+/// servers as described in the Queue page. Another subscription will log every message as they come in
+/// in a different subscription. This way different processes can consume the message and not interfere
+/// with each other or have to worry about losing messages.
+pub trait Subscription
     where Self: Sized
 {
-    /// The queue name.
-    fn queue(&self) -> &str;
+    /// The subscription name.
+    fn subscription(&self) -> &str;
+
+    /// The topic name.
+    fn topic(&self) -> &str;
 
     /// Regenerates the SAS string if it is close to expiring. Returns a valid SAS string
     /// This function may return the same String multiple times.
@@ -50,22 +55,6 @@ pub trait Queue
     /// The endpoint for the Queue. `http://{namespace}.servicebus.net/`
     fn endpoint(&self) -> &url::Url;
 
-    /// Send a message to the queue. Consumes the message. If the serve returned an error
-    /// Then this function will return an error. The default timeout is 30 seconds.
-    ///
-    /// ```
-    /// use servicebus::brokeredmessage::BrokeredMessage;
-    ///
-    /// let message = BrokeredMessage::with_body("This is a message");
-    /// match my_queue.send(message) {
-    ///     Ok(_) => println!("The message sent successfully"),
-    ///     Err(e) => println!("The error was: {:?}", e);
-    /// }
-    /// ```
-    fn send(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
-        let timeout = Duration::from_secs(30);
-        self.send_with_timeout(message, timeout)
-    }
 
     /// Receive a message from the queue. Returns either the deserialized message or an error
     /// detailing what went wrong. The message will not be deleted on the server until
@@ -84,36 +73,6 @@ pub trait Queue
         self.receive_and_delete_with_timeout(timeout)
     }
 
-    /// Sends a message to the Service Bus Queue with a designated timeout.
-    fn send_with_timeout(&self,
-                         message: BrokeredMessage,
-                         timeout: Duration)
-                         -> Result<(), AzureRequestError> {
-
-        let sas = self.refresh_sas();
-        let path = format!("{}/messages?timeout={}", self.queue(), timeout.as_secs());
-        match self.endpoint().join(&*path) {
-            Ok(uri) => {
-                // let sas = self.sas_key.borrow().clone();
-                let mut header = Headers::new();
-                header.set(Authorization(sas));
-
-                // This will always succeed.
-                let content_type: Mime = CONTENT_TYPE.parse().unwrap();
-                header.set(ContentType(content_type));
-                header.set(BrokerPropertiesHeader(message.props_as_json()));
-
-                let result = CLIENT.post(uri).headers(header).body(message.get_body_raw()).send();
-
-                match result {
-                    Ok(response) => interpret_results(response.status),
-                    Err(_) => Err(AzureRequestError::HyperError),
-                }
-            }
-            Err(_) => Err(AzureRequestError::InvalidEndpoint),
-        }
-    }
-
     /// Receive a message from the queue. Returns the deserialized message or an error.
     /// The message is deleted from the queue when it is received. If the application crashes,
     /// the contents of the message can be lost.
@@ -122,8 +81,9 @@ pub trait Queue
                                        -> Result<BrokeredMessage, AzureRequestError> {
 
         let sas = self.refresh_sas();
-        let path = format!("{}/messages/head?timeout={}",
-                           self.queue(),
+        let path = format!("{}/subscriptions/{}/messages/head?timeout={}",
+                           self.topic(),
+                           self.subscription(),
                            timeout.as_secs());
 
         match self.endpoint().join(&path) {
@@ -152,8 +112,9 @@ pub trait Queue
                             timeout: Duration)
                             -> Result<BrokeredMessage, AzureRequestError> {
         let sas = self.refresh_sas();
-        let path = format!("{}/messages/head?timeout={}",
-                           self.queue(),
+        let path = format!("{}/subscriptions/{}/messages/head?timeout={}",
+                           self.topic(),
+                           self.subscription(),
                            timeout.as_secs());
 
         match self.endpoint().join(&path) {
@@ -288,20 +249,22 @@ pub trait Queue
 /// Client for sending and receiving messages from a Service Bus Queue in Azure.
 /// This cient is `!Sync` because it internally uses a RefCell to keep track of
 /// its authorization token, but it is still ideal for single threaded use.
-pub struct QueueClient {
+pub struct SubscriptionClient {
     connection_string: String,
-    queue_name: String,
+    topic_name: String,
+    subscription_name: String,
     endpoint: url::Url,
     sas_info: RefCell<(String, usize)>,
 }
 
-impl QueueClient {
+impl SubscriptionClient {
     /// Create a new queue with a connection string and the name of a queue.
     /// The connection string can be copied and pasted from the azure portal.
     /// The queue name should be the name of an existing queue.
     pub fn with_conn_and_queue(connection_string: &str,
-                               queue: &str)
-                               -> Result<QueueClient, url::ParseError> {
+                               topic: &str,
+                               subscription: &str)
+                               -> Result<SubscriptionClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -324,9 +287,10 @@ impl QueueClient {
                 let (sas_key, expiry) = generate_sas(connection_string, duration);
                 let conn_string = connection_string.to_string();
 
-                Ok(QueueClient {
+                Ok(SubscriptionClient {
                     connection_string: conn_string,
-                    queue_name: queue.to_string(),
+                    subscription_name: subscription.to_string(),
+                    topic_name: topic.to_string(),
                     endpoint: url,
                     sas_info: RefCell::new((sas_key, expiry - SAS_BUFFER_TIME)),
                 })
@@ -336,9 +300,13 @@ impl QueueClient {
     }
 }
 
-impl Queue for QueueClient {
-    fn queue(&self) -> &str {
-        &self.queue_name
+impl Subscription for SubscriptionClient {
+    fn subscription(&self) -> &str {
+        &self.subscription_name
+    }
+
+    fn topic(&self) -> &str {
+        &self.topic_name
     }
 
     fn endpoint(&self) -> &url::Url {
@@ -372,17 +340,19 @@ impl Queue for QueueClient {
 ///     });
 /// }
 /// ```
-pub struct ConcurrentQueueClient {
+pub struct ConcurrentSubscriptionClient {
     connection_string: String,
-    queue_name: String,
+    topic_name: String,
+    subscription_name: String,
     endpoint: url::Url,
     sas_info: Mutex<(String, usize)>,
 }
 
-impl ConcurrentQueueClient {
+impl ConcurrentSubscriptionClient {
     pub fn with_conn_and_queue(connection_string: &str,
-                               queue: &str)
-                               -> Result<ConcurrentQueueClient, url::ParseError> {
+                               topic: &str,
+                               subscription: &str)
+                               -> Result<ConcurrentSubscriptionClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -405,9 +375,10 @@ impl ConcurrentQueueClient {
                 let (sas_key, expiry) = generate_sas(connection_string, duration);
                 let conn_string = connection_string.to_string();
 
-                Ok(ConcurrentQueueClient {
+                Ok(ConcurrentSubscriptionClient {
                     connection_string: conn_string,
-                    queue_name: queue.to_string(),
+                    subscription_name: subscription.to_string(),
+                    topic_name: topic.to_string(),
                     endpoint: url,
                     sas_info: Mutex::new((sas_key, expiry - SAS_BUFFER_TIME)),
                 })
@@ -417,9 +388,13 @@ impl ConcurrentQueueClient {
     }
 }
 
-impl Queue for ConcurrentQueueClient {
-    fn queue(&self) -> &str {
-        &self.queue_name
+impl Subscription for ConcurrentSubscriptionClient {
+    fn subscription(&self) -> &str {
+        &self.subscription_name
+    }
+
+    fn topic(&self) -> &str {
+        &self.topic_name
     }
 
     fn endpoint(&self) -> &url::Url {
@@ -463,7 +438,7 @@ fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
 // Complete, Abandon, Renew all make calls to the same Uri so here's a quick function
 // for generating it.
 fn get_message_update_path<T>(q: &T, message: &BrokeredMessage) -> Option<url::Url>
-    where T: Queue
+    where T: Subscription
 {
 
     // Take either the Sequence number or the Message ID
@@ -473,143 +448,13 @@ fn get_message_update_path<T>(q: &T, message: &BrokeredMessage) -> Option<url::U
         .map(|seq| seq.to_string())
         .or(message.props.MessageId.clone())
         .and_then(|id| message.props.LockToken.as_ref().map(|lock| (id, lock)))
-        .map(|(id, lock)| format!("/{}/messages/{}/{}", q.queue(), id, lock))
+        .map(|(id, lock)| {
+            format!("{}/subscriptions/{}/messages/{}/{}",
+                    q.topic(),
+                    q.subscription(),
+                    id,
+                    lock)
+        })
         .and_then(|path| q.endpoint().join(&*path).ok());
     target
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use servicebus::brokeredmessage::BrokeredMessage;
-
-    lazy_static!{
-        static ref CONNECTION_STRING: String = {
-            use std::io::BufReader;
-            use std::fs::File;
-            use std::io::prelude::*;
-            let mut s = String::new();
-            let mut reader = BufReader::new(File::open("connection_string.txt").unwrap());
-            reader.read_line(&mut s).unwrap();
-            s
-        };
-    }
-
-    #[test]
-    fn queue_send_message() {
-        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        let message = BrokeredMessage::with_body("Cats and Dogs");
-        match queue.send(message) {
-            Err(e) => {
-                println!("{:?}", e);
-                panic!("Failed to send message.")
-            }
-            _ => assert!(true),
-        }
-    }
-
-    #[test]
-    fn queue_receive_message() {
-        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        match queue.receive_and_delete() {
-            Err(e) => {
-                println!("{:?}", e);
-                panic!("Failed to receive message.")
-            }
-            Ok(_) => {}
-        }
-    }
-
-    #[test]
-    fn queue_complete_message() {
-        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
-        match queue.receive() {
-            Err(e) => {
-                println!("{:?}", e);
-                panic!("Failed to receive message.")
-            }
-            Ok(message) => {
-                match queue.complete_message(message.clone()) {
-                    Err(e) => {
-                        println!("{:?}", e);
-                        println!("{:?}", message);
-                        panic!("Failed to complete the message");
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn queue_abandon_message() {
-        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
-        match queue.receive() {
-            Err(e) => {
-                println!("{:?}", e);
-                panic!("Failed to receive message.")
-            }
-            Ok(message) => {
-                match queue.abandon_message(message.clone()) {
-                    Err(e) => {
-                        println!("{:?}", e);
-                        println!("{:?}", message);
-                        panic!("Failed to abandon the message");
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn queue_renew_message() {
-        let queue = QueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1").unwrap();
-        queue.send(BrokeredMessage::with_body("Complete this message")).unwrap();
-        match queue.receive() {
-            Err(e) => {
-                println!("{:?}", e);
-                panic!("Failed to receive message.")
-            }
-            Ok(message) => {
-                match queue.renew_message(message.clone()) {
-                    Err(e) => {
-                        println!("{:?}", e);
-                        println!("{:?}", message);
-                        panic!("Failed to renew the message");
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn conncurrent_queue_send_message() {
-        let queue = ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1")
-            .unwrap();
-        let message = BrokeredMessage::with_body("Cats and Dogs");
-        match queue.send(message) {
-            Err(e) => {
-                println!("{:?}", e);
-                panic!("Failed to send message.");
-            }
-            _ => {}
-        }
-    }
-
-    #[test]
-    fn concurrent_queue_receive_message() {
-        let queue = ConcurrentQueueClient::with_conn_and_queue(&CONNECTION_STRING, "test1")
-            .unwrap();
-        match queue.receive_and_delete() {
-            Err(e) => {
-                println!("{:?}", e);
-                panic!("Failed to receive a message");
-            }
-            Ok(_) => {}
-        }
-    }
 }
