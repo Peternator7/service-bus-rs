@@ -43,17 +43,17 @@ lazy_static!{
 pub trait Topic
     where Self: Sized
 {
-    /// The queue name.
+    /// The topic name.
     fn topic(&self) -> &str;
 
     /// Regenerates the SAS string if it is close to expiring. Returns a valid SAS string
     /// This function may return the same String multiple times.
     fn refresh_sas(&self) -> String;
 
-    /// The endpoint for the Queue. `http://{namespace}.servicebus.net/`
+    /// The endpoint for the topic. `http://{namespace}.servicebus.net/`
     fn endpoint(&self) -> &url::Url;
 
-    /// Send a message to the queue. Consumes the message. If the serve returned an error
+    /// Send a message to the topic. Consumes the message. If the server returned an error
     /// Then this function will return an error. The default timeout is 30 seconds.
     ///
     /// ```
@@ -71,7 +71,7 @@ pub trait Topic
     }
 
 
-    /// Sends a message to the Service Bus Queue with a designated timeout.
+    /// Sends a message to the Service Bus Topic with a designated timeout.
     fn send_with_timeout(&self,
                          message: BrokeredMessage,
                          timeout: Duration)
@@ -94,7 +94,7 @@ pub trait Topic
     }
 }
 
-/// Client for sending and receiving messages from a Service Bus Queue in Azure.
+/// Client for sending messages to a Service Bus Topic in Azure.
 /// This cient is `!Sync` because it internally uses a RefCell to keep track of
 /// its authorization token, but it is still ideal for single threaded use.
 pub struct TopicClient {
@@ -105,10 +105,10 @@ pub struct TopicClient {
 }
 
 impl TopicClient {
-    /// Create a new queue with a connection string and the name of a queue.
+    /// Create a new queue with a connection string and the name of a topic.
     /// The connection string can be copied and pasted from the azure portal.
-    /// The queue name should be the name of an existing queue.
-    pub fn with_conn_and_queue(connection_string: &str,
+    /// The queue name should be the name of an existing topic.
+    pub fn with_conn_and_topic(connection_string: &str,
                                topic: &str)
                                -> Result<TopicClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
@@ -163,17 +163,17 @@ impl Topic for TopicClient {
     }
 }
 
-/// The ConcurrentQueueClient has all the same methods as QueueClient, but it is also
-/// `Sync`. This means that it can be shared between threads. Prefer using a Arc<ConcurrentQueueClient>
-/// over an Arc<Mutex<QueueClient>> to share the thread between queues.
+/// The ConcurrentTopicClient has all the same methods as TopicClient, but it is also
+/// `Sync`. This means that it can be shared between threads. Prefer using a Arc<ConcurrentTopicClient>
+/// over an Arc<Mutex<TopicClient>> to share the thread between queues.
 ///
 /// ```
 /// use std::thread;
-/// let queue = Arc::new(ConcurrentQueueClient::with_conn_and_queue(conn,queue_name));
+/// let topic = Arc::new(ConcurrentTopicClient::with_conn_and_topic(conn,topic_name));
 /// for _ in 0..10 {
-///     let q = queue.clone();
+///     let t = topic.clone();
 ///     thread::spawn(move || {
-///         q.send(BrokeredMessage::with_body("Sending a concurrent message"));
+///         t.send(BrokeredMessage::with_body("Sending a concurrent message"));
 ///     });
 /// }
 /// ```
@@ -185,7 +185,7 @@ pub struct ConcurrentTopicClient {
 }
 
 impl ConcurrentTopicClient {
-    pub fn with_conn_and_queue(connection_string: &str,
+    pub fn with_conn_and_topic(connection_string: &str,
                                topic: &str)
                                -> Result<ConcurrentTopicClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);

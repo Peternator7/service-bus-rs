@@ -21,7 +21,7 @@ lazy_static!{
     static ref CLIENT: Client = Client::new();
 }
 
-/// The Queue Trait is an abstraction over different types of Queues that
+/// The Subscription Trait is an abstraction over different types of Subscription that
 /// can be used when communicating with an Azure Service Bus Queue. The concurrent version
 /// is both send and sync. All methods take a reference to the client so the ConcurrentQueueClient
 /// can be used across multiple threads by simply wrapping it in an Arc<T>. The only step that is
@@ -56,7 +56,7 @@ pub trait Subscription
     fn endpoint(&self) -> &url::Url;
 
 
-    /// Receive a message from the queue. Returns either the deserialized message or an error
+    /// Receive a message from the subscription. Returns either the deserialized message or an error
     /// detailing what went wrong. The message will not be deleted on the server until
     /// `queue_client.complete_message(message)` is called. This is ideal for applications that
     /// can't afford to miss a message.
@@ -65,16 +65,16 @@ pub trait Subscription
         self.receive_with_timeout(timeout)
     }
 
-    /// Receive a message from the queue. Returns the deserialized message or an error.
-    /// The message is deleted from the queue when it is received. If the application crashes,
+    /// Receive a message from the subscription. Returns the deserialized message or an error.
+    /// The message is deleted from the subscription when it is received. If the application crashes,
     /// the contents of the message can be lost.
     fn receive_and_delete(&self) -> Result<BrokeredMessage, AzureRequestError> {
         let timeout = Duration::from_secs(30);
         self.receive_and_delete_with_timeout(timeout)
     }
 
-    /// Receive a message from the queue. Returns the deserialized message or an error.
-    /// The message is deleted from the queue when it is received. If the application crashes,
+    /// Receive a message from the subscription. Returns the deserialized message or an error.
+    /// The message is deleted from the subscription when it is received. If the application crashes,
     /// the contents of the message can be lost.
     fn receive_and_delete_with_timeout(&self,
                                        timeout: Duration)
@@ -95,9 +95,9 @@ pub trait Subscription
         Ok(BrokeredMessage::with_response(response))
     }
 
-    /// Receive a message from the queue. Returns either the deserialized message or an error
+    /// Receive a message from the subscription. Returns either the deserialized message or an error
     /// detailing what went wrong. The message will not be deleted on the server until
-    /// `queue_client.complete_message(message)` is called. This is ideal for applications that
+    /// `subscription_client.complete_message(message)` is called. This is ideal for applications that
     /// can't afford to miss a message. Allows a timeout to be specified for greater control.
     fn receive_with_timeout(&self,
                             timeout: Duration)
@@ -121,9 +121,9 @@ pub trait Subscription
     /// if the message was created locally. Once a message is created, it cannot be restored
     ///
     /// ```
-    /// let message = my_queue.receive().unwrap();
+    /// let message = my_subscription.receive().unwrap();
     /// // Do lots of processing with the message. Send it to another database.
-    /// my_queue.complete_message(message);
+    /// my_subscription.complete_message(message);
     /// ```
     fn complete_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
@@ -157,19 +157,19 @@ pub trait Subscription
     }
 
     /// Renews the lock on a message. If a message is received by calling
-    /// `queue.receive()` or `queue.receive_with_timeout()` then the message is locked
+    /// `subscription.receive()` or `subscription.receive_with_timeout()` then the message is locked
     /// but not deleted on the Service Bus. This method allows the lock to be renewed
     /// if additional time is needed to finish processing the message.
     ///
     /// ```
     /// use std::thread::sleep;
     ///
-    /// let message = queue.receive();
+    /// let message = subscription.receive();
     /// sleep(2*60*1000);
     /// //Renew the lock on the message so that we can keep processing it.
-    /// queue.renew_message(message);
+    /// subscription.renew_message(message);
     /// sleep(2*60*1000);
-    /// queue.complete_message(message);
+    /// subscription.complete_message(message);
     /// ```
     fn renew_message(&self, message: &BrokeredMessage) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
@@ -187,9 +187,9 @@ pub trait Subscription
     /// Creates an event loop for handling messages that blocks the current thread.
     ///
     /// ```
-    /// queue.on_message(|message| {
+    /// subscription.on_message(|message| {
     ///     // Do message processing
-    ///     queue.complete_message(message);
+    ///     subscription.complete_message(message);
     /// });
     /// ```
     fn on_message<H>(&self, handler: H) -> AzureRequestError
@@ -206,7 +206,7 @@ pub trait Subscription
     }
 }
 
-/// Client for sending and receiving messages from a Service Bus Queue in Azure.
+/// Client for sending and receiving messages from a Service Bus Subscription in Azure.
 /// This cient is `!Sync` because it internally uses a RefCell to keep track of
 /// its authorization token, but it is still ideal for single threaded use.
 pub struct SubscriptionClient {
@@ -218,13 +218,14 @@ pub struct SubscriptionClient {
 }
 
 impl SubscriptionClient {
-    /// Create a new queue with a connection string and the name of a queue.
+    /// Create a new subscription with a connection string, the name of a
+    /// topic, and the name of a subscription.
     /// The connection string can be copied and pasted from the azure portal.
-    /// The queue name should be the name of an existing queue.
-    pub fn with_conn_and_queue(connection_string: &str,
-                               topic: &str,
-                               subscription: &str)
-                               -> Result<SubscriptionClient, url::ParseError> {
+    /// The subscription name should be the name of an existing subscription.
+    pub fn with_conn_topic_and_subscr(connection_string: &str,
+                                      topic: &str,
+                                      subscription: &str)
+                                      -> Result<SubscriptionClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
@@ -283,17 +284,17 @@ impl Subscription for SubscriptionClient {
     }
 }
 
-/// The ConcurrentQueueClient has all the same methods as QueueClient, but it is also
+/// The ConcurrentSubscriptionClient has all the same methods as SubscriptionClient, but it is also
 /// `Sync`. This means that it can be shared between threads. Prefer using a Arc<ConcurrentQueueClient>
-/// over an Arc<Mutex<QueueClient>> to share the thread between queues.
+/// over an Arc<Mutex<SubscriptionClient>> to share the thread between queues.
 ///
 /// ```
 /// use std::thread;
-/// let queue = Arc::new(ConcurrentQueueClient::with_conn_and_queue(conn,queue_name));
+/// let subscr = Arc::new(ConcurrentSubscriptionClient::with_conn_topic_and_subscr(conn,topic,subscription));
 /// for _ in 0..10 {
-///     let q = queue.clone();
+///     let s = subscr.clone();
 ///     thread::spawn(move || {
-///         q.send(BrokeredMessage::with_body("Sending a concurrent message"));
+///         s.send(BrokeredMessage::with_body("Sending a concurrent message"));
 ///     });
 /// }
 /// ```
@@ -306,10 +307,10 @@ pub struct ConcurrentSubscriptionClient {
 }
 
 impl ConcurrentSubscriptionClient {
-    pub fn with_conn_and_queue(connection_string: &str,
-                               topic: &str,
-                               subscription: &str)
-                               -> Result<ConcurrentSubscriptionClient, url::ParseError> {
+    pub fn with_conn_topic_and_subscr(connection_string: &str,
+                                      topic: &str,
+                                      subscription: &str)
+                                      -> Result<ConcurrentSubscriptionClient, url::ParseError> {
         let duration = Duration::from_secs(60 * 6);
         let mut endpoint = String::new();
         for param in connection_string.split(";") {
