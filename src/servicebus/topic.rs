@@ -128,20 +128,16 @@ impl TopicClient {
             };
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
-        match url::Url::parse(&*endpoint) {
-            Ok(url) => {
-                let (sas_key, expiry) = generate_sas(connection_string, duration);
-                let conn_string = connection_string.to_string();
+        let url = url::Url::parse(&endpoint)?;
+        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let conn_string = connection_string.to_string();
 
-                Ok(TopicClient {
-                    connection_string: conn_string,
-                    topic_name: topic.to_string(),
-                    endpoint: url,
-                    sas_info: RefCell::new((sas_key, expiry - SAS_BUFFER_TIME)),
-                })
-            }
-            Err(e) => Err(e),
-        }
+        Ok(TopicClient {
+            connection_string: conn_string,
+            topic_name: topic.to_string(),
+            endpoint: url,
+            sas_info: RefCell::new((sas_key, expiry - SAS_BUFFER_TIME)),
+        })
     }
 }
 

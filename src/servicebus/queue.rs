@@ -277,20 +277,16 @@ impl QueueClient {
             };
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
-        match url::Url::parse(&*endpoint) {
-            Ok(url) => {
-                let (sas_key, expiry) = generate_sas(connection_string, duration);
-                let conn_string = connection_string.to_string();
+        let url = url::Url::parse(&endpoint)?;
+        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let conn_string = connection_string.to_string();
 
-                Ok(QueueClient {
-                    connection_string: conn_string,
-                    queue_name: queue.to_string(),
-                    endpoint: url,
-                    sas_info: RefCell::new((sas_key, expiry - SAS_BUFFER_TIME)),
-                })
-            }
-            Err(e) => Err(e),
-        }
+        Ok(QueueClient {
+            connection_string: conn_string,
+            queue_name: queue.to_string(),
+            endpoint: url,
+            sas_info: RefCell::new((sas_key, expiry - SAS_BUFFER_TIME)),
+        })
     }
 }
 
@@ -358,20 +354,16 @@ impl ConcurrentQueueClient {
             };
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
-        match url::Url::parse(&*endpoint) {
-            Ok(url) => {
-                let (sas_key, expiry) = generate_sas(connection_string, duration);
-                let conn_string = connection_string.to_string();
+        let url = url::Url::parse(&endpoint)?;
+        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let conn_string = connection_string.to_string();
 
-                Ok(ConcurrentQueueClient {
-                    connection_string: conn_string,
-                    queue_name: queue.to_string(),
-                    endpoint: url,
-                    sas_info: Mutex::new((sas_key, expiry - SAS_BUFFER_TIME)),
-                })
-            }
-            Err(e) => Err(e),
-        }
+        Ok(ConcurrentQueueClient {
+            connection_string: conn_string,
+            queue_name: queue.to_string(),
+            endpoint: url,
+            sas_info: Mutex::new((sas_key, expiry - SAS_BUFFER_TIME)),
+        })
     }
 }
 
