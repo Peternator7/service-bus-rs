@@ -86,22 +86,13 @@ pub trait Subscription
                            self.subscription(),
                            timeout.as_secs());
 
-        match self.endpoint().join(&path) {
-            Ok(uri) => {
-                let mut header = Headers::new();
-                header.set(Authorization(sas));
-                let result = CLIENT.delete(uri).headers(header).send();
-                if let Ok(response) = result {
-                    match interpret_results(response.status) {
-                        Ok(()) => Ok(BrokeredMessage::with_response(response)),
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    Err(AzureRequestError::HyperError)
-                }
-            }
-            Err(_) => Err(AzureRequestError::InvalidEndpoint),
-        }
+        let uri = self.endpoint().join(&path)?;
+        let mut header = Headers::new();
+        header.set(Authorization(sas));
+
+        let response = CLIENT.delete(uri).headers(header).send()?;
+        interpret_results(response.status)?;
+        Ok(BrokeredMessage::with_response(response))
     }
 
     /// Receive a message from the queue. Returns either the deserialized message or an error
@@ -117,22 +108,13 @@ pub trait Subscription
                            self.subscription(),
                            timeout.as_secs());
 
-        match self.endpoint().join(&path) {
-            Ok(uri) => {
-                let mut header = Headers::new();
-                header.set(Authorization(sas));
-                let result = CLIENT.post(uri).headers(header).send();
-                if let Ok(response) = result {
-                    match interpret_results(response.status) {
-                        Ok(()) => Ok(BrokeredMessage::with_response(response)),
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    Err(AzureRequestError::HyperError)
-                }
-            }
-            Err(_) => Err(AzureRequestError::InvalidEndpoint),
-        }
+        let uri = self.endpoint().join(&path)?;
+
+        let mut header = Headers::new();
+        header.set(Authorization(sas));
+        let response = CLIENT.post(uri).headers(header).send()?;
+        interpret_results(response.status)?;
+        Ok(BrokeredMessage::with_response(response))
     }
 
     /// Completes a message that has been received from the Service Bus. This will fail
@@ -148,20 +130,13 @@ pub trait Subscription
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message);
+        let target = get_message_update_path(self, &message)?;
 
-        if let Some(target) = target {
-            let mut header = Headers::new();
-            header.set(Authorization(sas));
-            let result = CLIENT.delete(target).headers(header).send();
-            if let Ok(response) = result {
-                interpret_results(response.status)
-            } else {
-                Err(AzureRequestError::HyperError)
-            }
-        } else {
-            Err(AzureRequestError::LocalMessage)
-        }
+        let mut header = Headers::new();
+        header.set(Authorization(sas));
+        let response = CLIENT.delete(target).headers(header).send()?;
+        interpret_results(response.status)
+
     }
 
     /// Releases the lock on a message and puts it back into the queue.
@@ -172,20 +147,13 @@ pub trait Subscription
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message);
+        let target = get_message_update_path(self, &message)?;
 
-        if let Some(target) = target {
-            let mut header = Headers::new();
-            header.set(Authorization(sas));
-            let result = CLIENT.put(target).headers(header).send();
-            if let Ok(response) = result {
-                interpret_results(response.status)
-            } else {
-                Err(AzureRequestError::HyperError)
-            }
-        } else {
-            Err(AzureRequestError::LocalMessage)
-        }
+        let mut header = Headers::new();
+        header.set(Authorization(sas));
+        let response = CLIENT.put(target).headers(header).send()?;
+        interpret_results(response.status)
+
     }
 
     /// Renews the lock on a message. If a message is received by calling
@@ -208,20 +176,12 @@ pub trait Subscription
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message);
+        let target = get_message_update_path(self, &message)?;
 
-        if let Some(target) = target {
-            let mut header = Headers::new();
-            header.set(Authorization(sas));
-            let result = CLIENT.post(target).headers(header).send();
-            if let Ok(response) = result {
-                interpret_results(response.status)
-            } else {
-                Err(AzureRequestError::HyperError)
-            }
-        } else {
-            Err(AzureRequestError::LocalMessage)
-        }
+        let mut header = Headers::new();
+        header.set(Authorization(sas));
+        let response = CLIENT.post(target).headers(header).send()?;
+        interpret_results(response.status)
     }
 
     /// Creates an event loop for handling messages that blocks the current thread.
@@ -437,7 +397,9 @@ fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
 
 // Complete, Abandon, Renew all make calls to the same Uri so here's a quick function
 // for generating it.
-fn get_message_update_path<T>(q: &T, message: &BrokeredMessage) -> Option<url::Url>
+fn get_message_update_path<T>(q: &T,
+                              message: &BrokeredMessage)
+                              -> Result<url::Url, AzureRequestError>
     where T: Subscription
 {
 
@@ -455,6 +417,7 @@ fn get_message_update_path<T>(q: &T, message: &BrokeredMessage) -> Option<url::U
                     id,
                     lock)
         })
-        .and_then(|path| q.endpoint().join(&*path).ok());
+        .and_then(|path| q.endpoint().join(&*path).ok())
+        .ok_or(AzureRequestError::LocalMessage);
     target
 }

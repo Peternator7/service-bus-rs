@@ -79,26 +79,18 @@ pub trait Topic
 
         let sas = self.refresh_sas();
         let path = format!("{}/messages?timeout={}", self.topic(), timeout.as_secs());
-        match self.endpoint().join(&*path) {
-            Ok(uri) => {
-                // let sas = self.sas_key.borrow().clone();
-                let mut header = Headers::new();
-                header.set(Authorization(sas));
+        let uri = self.endpoint().join(&path)?;
 
-                // This will always succeed.
-                let content_type: Mime = CONTENT_TYPE.parse().unwrap();
-                header.set(ContentType(content_type));
-                header.set(BrokerPropertiesHeader(message.props_as_json()));
+        let mut header = Headers::new();
+        header.set(Authorization(sas));
 
-                let result = CLIENT.post(uri).headers(header).body(message.get_body_raw()).send();
+        // This will always succeed.
+        let content_type: Mime = CONTENT_TYPE.parse().unwrap();
+        header.set(ContentType(content_type));
+        header.set(BrokerPropertiesHeader(message.props_as_json()));
 
-                match result {
-                    Ok(response) => interpret_results(response.status),
-                    Err(_) => Err(AzureRequestError::HyperError),
-                }
-            }
-            Err(_) => Err(AzureRequestError::InvalidEndpoint),
-        }
+        let response = CLIENT.post(uri).headers(header).body(message.get_body_raw()).send()?;
+        interpret_results(response.status)
     }
 }
 
@@ -217,20 +209,16 @@ impl ConcurrentTopicClient {
             };
         }
         endpoint = String::new() + "https" + endpoint.split_at(endpoint.find(":").unwrap_or(0)).1;
-        match url::Url::parse(&*endpoint) {
-            Ok(url) => {
-                let (sas_key, expiry) = generate_sas(connection_string, duration);
-                let conn_string = connection_string.to_string();
+        let url = url::Url::parse(&endpoint)?;
+        let (sas_key, expiry) = generate_sas(connection_string, duration);
+        let conn_string = connection_string.to_string();
 
-                Ok(ConcurrentTopicClient {
-                    connection_string: conn_string,
-                    topic_name: topic.to_string(),
-                    endpoint: url,
-                    sas_info: Mutex::new((sas_key, expiry - SAS_BUFFER_TIME)),
-                })
-            }
-            Err(e) => Err(e),
-        }
+        Ok(ConcurrentTopicClient {
+            connection_string: conn_string,
+            topic_name: topic.to_string(),
+            endpoint: url,
+            sas_info: Mutex::new((sas_key, expiry - SAS_BUFFER_TIME)),
+        })
     }
 }
 
