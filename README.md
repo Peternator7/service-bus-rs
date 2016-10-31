@@ -75,7 +75,7 @@ fn main() {
 }
 ```
 
-Prefer using the concurrent versions to Arc<Mutex<Client>>. Only a small part of the message sending and receiving requires
+Prefer using the concurrent versions to `Arc<Mutex<Client>>`. Only a small part of the message sending and receiving requires
 syncronization so the concurrent versions leverage that fact for increased parallelism.
 
 ## The Message Body
