@@ -85,3 +85,8 @@ it and automatically wraps the messages it sends in <string></string> tags to al
 
 The Rust library currently only supports serializing/deserializing strings. This may change in the future, but in the meantime,
 serialize your object before adding it to the BrokeredMessage.
+
+## Disclaimer
+
+I work for Microsoft Corporation, but this project is not endorsed or sponsored by Microsoft and entirely uses resources that are
+publicly available on the internet.
