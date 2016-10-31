@@ -12,7 +12,6 @@ use hyper::client::Client;
 use hyper::header::*;
 use hyper::status::StatusCode;
 
-const CONTENT_TYPE: &'static str = "application/atom+xml;type=entry;charset=utf-8";
 const SAS_BUFFER_TIME: usize = 15;
 
 // Ideally this should be a field on the client, but we don't want to expose it through
