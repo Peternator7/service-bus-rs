@@ -102,7 +102,7 @@ pub trait Queue
         header.set(ContentType(content_type));
         header.set(BrokerPropertiesHeader(message.props_as_json()));
 
-        let response = CLIENT.post(uri).headers(header).body(message.get_body_raw()).send()?;
+        let response = CLIENT.post(uri).headers(header).body(&message.serialize_body()).send()?;
         interpret_results(response.status)
     }
 
@@ -161,12 +161,12 @@ pub trait Queue
     /// // Do lots of processing with the message. Send it to another database.
     /// my_queue.complete_message(message);
     /// ```
-    fn complete_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
+    fn complete_message(&self, mut message: BrokeredMessage) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?;
+        let target = get_message_update_path(self, &mut message)?;
 
         let mut header = Headers::new();
         header.set(Authorization(sas));
@@ -178,12 +178,12 @@ pub trait Queue
     /// Releases the lock on a message and puts it back into the queue.
     /// This method generally indicates that the message could not be
     /// handled properly and should be attempted at a later time.
-    fn abandon_message(&self, message: BrokeredMessage) -> Result<(), AzureRequestError> {
+    fn abandon_message(&self, mut message: BrokeredMessage) -> Result<(), AzureRequestError> {
         let sas = self.refresh_sas();
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?;
+        let target = get_message_update_path(self, &mut message)?;
         let mut header = Headers::new();
         header.set(Authorization(sas));
 
@@ -207,18 +207,21 @@ pub trait Queue
     /// sleep(2*60*1000);
     /// queue.complete_message(message);
     /// ```
-    fn renew_message(&self, message: &BrokeredMessage) -> Result<(), AzureRequestError> {
+    fn renew_message(&self,
+                     mut message: BrokeredMessage)
+                     -> Result<BrokeredMessage, AzureRequestError> {
         let sas = self.refresh_sas();
 
         // Take either the Sequence number or the Message ID
         // Then add the lock token and finally join it into the targer
-        let target = get_message_update_path(self, &message)?;
+        let target = get_message_update_path(self, &mut message)?;
 
         let mut header = Headers::new();
         header.set(Authorization(sas));
         let response = CLIENT.post(target).headers(header).send()?;
-        interpret_results(response.status)
+        interpret_results(response.status)?;
 
+        Ok(message)
     }
 
     /// Creates an event loop for handling messages that blocks the current thread.
@@ -413,21 +416,24 @@ fn interpret_results(status: StatusCode) -> Result<(), AzureRequestError> {
 // Complete, Abandon, Renew all make calls to the same Uri so here's a quick function
 // for generating it.
 fn get_message_update_path<T>(q: &T,
-                              message: &BrokeredMessage)
+                              message: &mut BrokeredMessage)
                               -> Result<url::Url, AzureRequestError>
     where T: Queue
 {
 
+    let props = message.get_props_mut();
+
     // Take either the Sequence number or the Message ID
     // Then add the lock token and finally join it into the targer
-    let target = message.props
-        .SequenceNumber
+    let ident = props.SequenceNumber
         .map(|seq| seq.to_string())
-        .or(message.props.MessageId.clone())
-        .and_then(|id| message.props.LockToken.as_ref().map(|lock| (id, lock)))
+        .or(props.MessageId.clone());
+
+    let target = ident.and_then(|id| props.LockToken.as_ref().map(|lock| (id, lock)))
         .map(|(id, lock)| format!("/{}/messages/{}/{}", q.queue(), id, lock))
         .and_then(|path| q.endpoint().join(&*path).ok())
         .ok_or(AzureRequestError::LocalMessage);
+
     target
 }
 

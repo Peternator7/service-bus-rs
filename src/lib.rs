@@ -14,6 +14,9 @@ extern crate time as time2;
 #[macro_use]
 extern crate url;
 
+#[macro_use]
+mod macros;
+
 /// Contains shared functionality between all the different
 /// modules inside of the Azure Libary
 ///

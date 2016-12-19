@@ -89,7 +89,7 @@ pub trait Topic
         header.set(ContentType(content_type));
         header.set(BrokerPropertiesHeader(message.props_as_json()));
 
-        let response = CLIENT.post(uri).headers(header).body(message.get_body_raw()).send()?;
+        let response = CLIENT.post(uri).headers(header).body(&message.serialize_body()).send()?;
         interpret_results(response.status)
     }
 }

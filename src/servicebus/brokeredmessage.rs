@@ -1,9 +1,17 @@
 use std::io::Read;
-use core::error::AzureRequestError;
 use hyper::client::Response;
 use serde_json;
 
+lazy_static!{
+    static ref DEFAULT_PROPERTIES: BrokerProperties = Default::default();
+}
+
 header! { (BrokerPropertiesHeader, "BrokerProperties") => [String] }
+
+// The .Net client expects this to wrap the string so we do that as well.
+const XML_OPEN: &'static str = "<string xmlns=\"http://schemas.microsoft.\
+                                com/2003/10/Serialization/\">";
+const XML_CLOSE: &'static str = "</string>";
 
 ///
 /// A list of the properties that the message can have.
@@ -55,34 +63,15 @@ pub struct BrokerProperties {
 /// BrokeredMessage has unique clone behavior. It is possible to clone a message and then
 /// perform actions on it that fail because the message no longer exists on the server.
 ///
-/// ````
-/// let message = client.receive();
-/// let message2 = message.clone();
-///
-/// // The message is deleted on the server here.
-/// client.complete_message(message);
-///
-/// // Continue working with message2;
-///
-/// // This will fail because the message has already been completed once.
-/// client.complete_message(messsage2)
-/// ````
-///
 #[derive(Clone,Eq,PartialEq,Debug)]
 pub struct BrokeredMessage {
-    pub props: Box<BrokerProperties>,
+    props: Option<Box<BrokerProperties>>,
     body: String,
 }
 
 impl BrokeredMessage {
     /// Serializes the string into a message. Note that the message is wrapped in
     /// XML to be compatible with what .Net and most client letters are expecting.
-    ///
-    /// Your message will be serialized into:
-    ///
-    /// ```
-    /// <string>Here's your message</string>
-    /// ```
     ///
     /// This library will correctly deserialize your message and it is designed to
     /// be deserializeable by a .Net client as well.
@@ -93,68 +82,173 @@ impl BrokeredMessage {
     /// a message out of it.
     pub fn with_body(body: &str) -> BrokeredMessage {
         BrokeredMessage {
-            body: format!("<string>{}</string>", body),
-            props: Box::new(Default::default()),
-        }
-    }
-
-    ///
-    /// Create a new message with a body and properties.
-    /// You usually won't call this method directly.
-    pub fn with_body_and_props(body: &str, props: BrokerProperties) -> BrokeredMessage {
-        BrokeredMessage {
             body: body.to_string(),
-            props: Box::new(props),
+            props: None,
         }
     }
 
     ///
     /// Create a new message from a Hyper Http response.
     /// This deserializes the Message Properties and moves the body into the
-    /// message. It doesn't attempt to deserialize the body into XML. This is done
-    /// lazily in the event that the body is malformed or not serialized.
-    /// The message can still be completed or the body can be parsed from its raw contents.
+    /// message. It attempts to deserialize the message according the XML
+    /// spec the .Net library uses. If that fails it just takes the message
+    /// as is.
     ///
     pub fn with_response(mut response: Response) -> BrokeredMessage {
         let mut body = String::new();
         response.read_to_string(&mut body).ok();
+        body = BrokeredMessage::parse_body(&body).unwrap_or(body);
 
         let props = response.headers
             .get::<BrokerPropertiesHeader>()
             .and_then(|header| serde_json::from_str::<BrokerProperties>(header).ok())
-            .unwrap_or(Default::default());
+            .map(|p| Box::new(p));
 
         BrokeredMessage {
             body: body,
-            props: Box::new(props),
+            props: props,
         }
     }
 
-    /// Attempts to deserialize the body into a String loosely based on what the .Net client
-    /// will attempt to do when deserialzing the message.
-    pub fn get_body(&self) -> Result<String, AzureRequestError> {
-        // Get the opening of the first string.
-        self.body.trim()
-            .find("<string")
-            .and_then(|idx| if idx == 0 {Some(self.body.split_at(idx).1) } else { None })
-            // Look for the closing brace and take everything in the middle.
-            .and_then(|rhs| rhs.rfind("</string>").map(|idx| rhs.split_at(idx).0))
-            // Skip the rest of the opening tag. Then build a new string from the rest of the body.
-            .map(|inner| inner.chars().skip_while(|&ch| ch != '>').skip(1).collect::<String>())
-            // If any of these steps failed, return an error.
-            .ok_or(AzureRequestError::NonSerializedBody)
-    }
-
-    /// Returns the raw string body. This is useful if the agent who put the message in the
-    /// queue didn't serialize the message.
-    pub fn get_body_raw(&self) -> &str {
+    pub fn get_body(&self) -> &str {
         &self.body
     }
 
+    ///
+    /// Get the property bag of the current message. This returns an empty property bag if
+    /// they haven't been created yet. Thanks to Rust's aliasing rules
+    /// if there are no properties, then we can safely point them at a static reference
+    /// because there are no mutable references that could change the fields while we're
+    /// looking at them.
+    ///
+    pub fn get_props(&self) -> &BrokerProperties {
+        if let Some(ref props) = self.props {
+            props
+        } else {
+            &DEFAULT_PROPERTIES
+        }
+    }
+
+    ///
+    /// Get a mutable reference to the properties. This creates a new property bag if
+    /// the message doesn't currently have any set. We lazily create the properties to
+    /// avoid heap allocations for simple operations like creating a message and
+    /// sending it.
+    ///
+    pub fn get_props_mut(&mut self) -> &mut BrokerProperties {
+        if self.props.is_none() {
+            self.props = Some(Box::new(Default::default()));
+        }
+
+        self.props.as_mut().unwrap()
+    }
+
+    ///
+    /// Attempts to deserialize the body into a String loosely based on what the .Net client
+    /// will attempt to do when deserialzing the message.
+    ///
+    fn parse_body(body: &str) -> Option<String> {
+        // Get the opening of the first string.
+        // Note that treating these strings like bytes are valid because we are
+        // looking for 'ascii' characters.
+        let full = body.trim();
+        let mut idx = opt!(full.find(XML_OPEN));
+        if idx != 0 {
+            return None;
+        }
+
+        let right = full.split_at(XML_OPEN.len()).1;
+        idx = opt!(right.rfind(XML_CLOSE));
+        if idx != right.len() - XML_CLOSE.len() {
+            return None;
+        }
+
+        let mut inner = right.split_at(idx).0;
+        let mut output = String::with_capacity(inner.len());
+
+        while let Some(amp) = inner.find('&') {
+            let (l, r) = inner.split_at(amp);
+            output.push_str(l);
+
+            if r.starts_with("&lt;") {
+                output.push('<');
+                inner = &r[4..];
+            } else if r.starts_with("&gt;") {
+                output.push('>');
+                inner = &r[4..]
+            } else if r.starts_with("&amp;") {
+                output.push('&');
+                inner = &r[5..];
+            } else {
+                // This is a malformed string.
+                return None;
+            }
+        }
+
+        output.push_str(inner);
+        Some(output)
+    }
+
+    ///
+    /// Serializes the body of the message for transmission.
+    /// The message is wrapped in xml, and '<','>', and '&' are encoded.
+    /// This is to make the messages compatible with the .Net client libraries.
+    ///
+    /// ```xml
+    /// <string xmlns=\"http://schemas.microsoft.com/2003/10/Serialization/\">
+    ///     Cats &amp; Dogs are &gt; Fish.
+    /// </string>
+    /// ```
+    ///
+    pub fn serialize_body(&self) -> String {
+        let mut last = 0;
+        // Allocate a little bit of extra space for angle brackets.
+        let mut output = String::with_capacity(self.body.len() + XML_OPEN.len() + XML_CLOSE.len() +
+                                               40);
+        output.push_str(XML_OPEN);
+        for (idx, b) in self.body.bytes().enumerate() {
+            let mut needs_replacement = false;
+            let replacement;
+            match b {
+                b'<' => {
+                    needs_replacement = true;
+                    replacement = "&lt;"
+                }
+                b'>' => {
+                    needs_replacement = true;
+                    replacement = "&gt;"
+                }
+                b'&' => {
+                    needs_replacement = true;
+                    replacement = "&amp;"
+                }
+                _ => {
+                    replacement = "";
+                }
+            }
+
+            if needs_replacement {
+                output.push_str(&self.body[last..idx]);
+                output.push_str(replacement);
+                last = idx + 1;
+            }
+        }
+
+        output.push_str(&self.body[last..]);
+        output.push_str(XML_CLOSE);
+        output
+    }
+
+    ///
     /// Serializes all of the message properties into JSON. This is mostly used to transmit
     /// over HTTP, but it is exposed to the user of the library as well.
+    ///
     pub fn props_as_json(&self) -> String {
-        serde_json::to_string(&self.props).unwrap()
+        if let Some(ref props) = self.props {
+            serde_json::to_string(props).unwrap()
+        } else {
+            String::from("{}")
+        }
     }
 }
 
@@ -162,25 +256,14 @@ impl BrokeredMessage {
 mod tests {
     use super::*;
 
+    fn format_response(input: &str) -> String {
+        format!("{}{}{}", XML_OPEN, input, XML_CLOSE)
+    }
+
     #[test]
     fn message_empty_test() {
         let message = BrokeredMessage::with_body("");
-        assert_eq!(Ok(String::from("")), message.get_body());
-        assert_eq!("<string></string>", message.get_body_raw());
-    }
-
-    #[test]
-    fn message_deserializes_test() {
-        let message = BrokeredMessage::with_body("<b>Hello World</b>");
-        assert_eq!(Ok(String::from("<b>Hello World</b>")), message.get_body());
-        assert_eq!("<string><b>Hello World</b></string>",
-                   message.get_body_raw());
-    }
-
-    #[test]
-    fn message_json_test() {
-        let message = BrokeredMessage::with_body("{\"Azure\":2}");
-        assert_eq!(Ok(String::from("{\"Azure\":2}")), message.get_body());
-        assert_eq!("<string>{\"Azure\":2}</string>", message.get_body_raw());
+        assert_eq!("", message.get_body());
+        assert_eq!(format_response(""), message.serialize_body());
     }
 }
